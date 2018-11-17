@@ -1,13 +1,9 @@
-﻿using System;
-using System.Threading;
+﻿using CTRE.Phoenix.Controller;
+using CTRE.Phoenix.MotorControl;
 using Microsoft.SPOT;
 using System.Text;
+using System.Threading;
 
-
-using CTRE.Phoenix;
-using CTRE.Phoenix.Controller;
-using CTRE.Phoenix.MotorControl;
-using CTRE.Phoenix.MotorControl.CAN;
 
 namespace HeroArcadeDriveEx
 {
@@ -23,12 +19,8 @@ namespace HeroArcadeDriveEx
 
         static CTRE.Phoenix.Controller.GameController _gamepad = null;
 
-        static CTRE.Phoenix.Controller.GameControllerValues gv = new CTRE.Phoenix.Controller.GameControllerValues();
-
-
-        public static float WheelGain = 0.7F;
-        public static float rightstick = 0.0F;
-        public static float wheelAdjust = 0.0F;
+        public static float x = 0.0F;
+        public static float y = 0.0F;
         public static bool Mode = false;
 
         public static void Main()
@@ -36,13 +28,19 @@ namespace HeroArcadeDriveEx
             /* loop forever */
             while (true)
             {
-                /* drive robot using gamepad */
-                Drive();
+                if (null == _gamepad)
+                    _gamepad = new GameController(new CTRE.Phoenix.UsbHostDevice(0));
+                // This is the code that keeps the robot safe, if we loose the controller, "DON'T FEED THE DOG" 
+                if (_gamepad.GetConnectionStatus() == CTRE.Phoenix.UsbDeviceConnection.Connected)
+                {
+                    /* feed watchdog to keep Talon's enabled */
+                    CTRE.Phoenix.Watchdog.Feed();
+                    /* drive robot using gamepad */
+                    Drive();
+                }
                 /* print whatever is in our string builder */
                 Debug.Print(stringBuilder.ToString());
                 stringBuilder.Clear();
-                /* feed watchdog to keep Talon's enabled */
-                CTRE.Phoenix.Watchdog.Feed();
                 /* run this task every 20ms */
                 Thread.Sleep(20);
             }
@@ -53,11 +51,11 @@ namespace HeroArcadeDriveEx
          */
         static void Deadband(ref float value)
         {
-            if (value < -0.10)
+            if (value < -0.05)
             {
                 /* outside of deadband */
             }
-            else if (value > +0.10)
+            else if (value > +0.05)
             {
                 /* outside of deadband */
             }
@@ -67,81 +65,94 @@ namespace HeroArcadeDriveEx
                 value = 0;
             }
         }
-        static void Quickturn()
-        {
-            wheelAdjust = WheelGain * rightstick;
-            FrontLeft.Set(wheelAdjust);
-            BackLeft.Set(wheelAdjust);
-            FrontRight.Set(-wheelAdjust);
-            BackRight.Set(-wheelAdjust);
-        }
+
         static void Drive()
         {
-            if (null == _gamepad)
-                _gamepad = new GameController(new CTRE.Phoenix.UsbHostDevice(0));
-            //_gamepad.GetAllValues(ref gv);
+
+            // left and right "stick" values are raw data, "x" and "y" are Deadband values 
             float leftstick = 0.0F;
             float rightstick = 0.0F;
-            float HaloThreshold = 0.25F;
-            double wheelAdjust = 0.0F;
+            // These are variables for the calcualted power levels sent to MotorControllers.
+            float leftThrottle = 0.0F;
+            float rightThrottle = 0.0F;
+            float wheelAdjust = 0.0F;
+            // These are the Halo Drive Tuning Constants, values need to be tuned to bot, wheelbase and gear ratios determine tunings.
             float WheelGain = 0.7F;
+            float quickTurnGain = 0.5F;
+            float HaloThreshold = 0.15F;
+
             bool ControlTypeTank = _gamepad.GetButton(1);
             bool ControlTypeHalo = _gamepad.GetButton(3);
-            //bool Default = true;
             string Type = "";
+
             if (ControlTypeTank || Mode)
             {
-                leftstick = _gamepad.GetAxis(1);
-                rightstick = _gamepad.GetAxis(5);
+                leftstick = -1 * _gamepad.GetAxis(1);
+                rightstick = -1 * _gamepad.GetAxis(5);
+                x = leftstick;
+                y = rightstick;
+                Deadband(ref x);
+                Deadband(ref y);
                 Mode = true;
                 Type = "Tank";
-            } 
+                leftThrottle = x;
+                rightThrottle = y;
+
+            }
             if (ControlTypeHalo || Mode == false)
             {
-                leftstick = _gamepad.GetAxis(1);
-                rightstick = _gamepad.GetAxis(2);
+                leftstick = -1 * _gamepad.GetAxis(1);
+                rightstick = -1 * _gamepad.GetAxis(2);
+                x = leftstick;
+                y = rightstick;
+                Deadband(ref x);
+                Deadband(ref y);
                 Mode = false;
                 Type = "Halo";
-            }
-
-            float x;
-            x = leftstick;
-            float y;
-            y = rightstick;
-            Deadband(ref x);
-            Deadband(ref y);
-
-            float leftThrot = x; //+ twist;
-            float rightThrot = y; //- twist;
-
-            if (ControlTypeHalo)
-            {
-                if (System.Math.Abs(x) > HaloThreshold)
+                // If Throttle is below threshold, then do quickturn calcuation 
+                if (System.Math.Abs(x) < HaloThreshold)
                 {
-                    Quickturn();
+                    wheelAdjust = quickTurnGain * y;
+                    leftThrottle = -wheelAdjust;
+                    rightThrottle = wheelAdjust;
                 }
+                // Not Quickturn, so do the typical Halo calculation 
                 else
                 {
-                    WheelGain = WheelGain * rightstick;
-                    FrontLeft.Set((float)leftThrot - (float)wheelAdjust);
-                    BackLeft.Set((float)leftThrot - (float)wheelAdjust);
-                    FrontRight.Set((float)leftThrot + (float)wheelAdjust);
-                    BackRight.Set((float)leftThrot + (float)wheelAdjust);
+                    wheelAdjust = WheelGain * y;
+                    leftThrottle = x - wheelAdjust;
+                    rightThrottle = x + wheelAdjust;
                 }
             }
-            else
-            {
-                FrontLeft.Set((float)leftThrot);
-                BackLeft.Set((float)leftThrot);
-                FrontRight.Set((float)rightThrot);
-                BackRight.Set((float)rightThrot);
-            }
+
+            // Forcing throttle values between -1 and 1 "There is probably a better function to do this, but I am ignorant"
+            if (leftThrottle > 1) leftThrottle = 1;
+            if (leftThrottle < -1) leftThrottle = -1;
+            if (rightThrottle > 1) rightThrottle = 1;
+            if (rightThrottle < -1) rightThrottle = -1;
+
+            // Write Motor Control Values to the Motor Controllers ONCE!!!!! 
+            FrontLeft.Set(leftThrottle);
+            BackLeft.Set(leftThrottle);
+            FrontRight.Set(rightThrottle);
+            BackRight.Set(rightThrottle);
+
 
             stringBuilder.Append(Type);
+            stringBuilder.Append("\t");
+            stringBuilder.Append(leftstick);
+            stringBuilder.Append("\t");
+            stringBuilder.Append(rightstick);
             stringBuilder.Append("\t");
             stringBuilder.Append(x);
             stringBuilder.Append("\t");
             stringBuilder.Append(y);
+            stringBuilder.Append("\t");
+            stringBuilder.Append(leftThrottle);
+            stringBuilder.Append("\t");
+            stringBuilder.Append(rightThrottle);
+            stringBuilder.Append("\t");
+            stringBuilder.Append(wheelAdjust);
             stringBuilder.Append("\t");
         }
     }
